@@ -1,0 +1,47 @@
+name: Run Web Crawler
+
+on:
+  schedule:
+    # Run weekly on Sunday at 02:00 UTC
+    - cron: '0 2 * * 0'
+  workflow_dispatch:   # Allows manual trigger
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr poppler-utils
+
+      - name: Install Python dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run crawler
+        run: |
+          python crawler.py
+
+      - name: Upload crawled data (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: crawled-data
+          path: crawled_data.txt
+
+      # Optional: Commit the file back to the repository
+      - name: Commit and push if changes
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git add crawled_data.txt
+          git diff --quiet && git diff --staged --quiet || git commit -m "Update crawled data"
+          git push
