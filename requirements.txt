@@ -1,8 +1,6 @@
-requests==2.31.0
-beautifulsoup4==4.12.3
-PyPDF2==1.26.0
-pdfplumber==0.10.2
-Pillow==10.2.0
-pytesseract==0.3.10
-urllib3==2.2.1
-tqdm==4.66.1
+requests
+beautifulsoup4
+tldextract
+pdfplumber
+Pillow
+pytesseract
