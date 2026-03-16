@@ -16,7 +16,7 @@ import tqdm
 # === CONFIGURATION ===
 BASE_URL = "https://fmuniversity.nic.in/index"
 MAX_DEPTH = 3
-DELAY1.0
+DELAY=1.0
 OUTPUT_DIR = Path("output")
 MAX_PAGES = 500
 
