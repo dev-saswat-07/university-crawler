@@ -1,174 +1,154 @@
-# crawler.py
 import os
-import re
-import time
 import requests
-import io
+import time
+import urllib.robotparser
 from urllib.parse import urljoin, urlparse
+import tldextract
 from bs4 import BeautifulSoup
-from PyPDF2 import PdfReader
 import pdfplumber
 from PIL import Image
 import pytesseract
-from pathlib import Path
-import tqdm
+from io import BytesIO
 
-# === CONFIGURATION ===
-BASE_URL = "https://fmuniversity.nic.in/index"
-MAX_DEPTH = 3
-DELAY = 1.0  # Fixed: was DELAY1.0
-OUTPUT_DIR = Path("output")
+# Configuration
+SEED_URL = "https://fmuniversity.nic.in/index"
+OUTPUT_FILE = "crawled_data.txt"
+DELAY = 1  # seconds between requests
+USER_AGENT = "Mozilla/5.0 (compatible; FMU-Crawler/1.0; +https://github.com/yourrepo)"
 MAX_PAGES = 500
+VISITED = set()
+QUEUE = []
+DOMAIN = "fmuniversity.nic.in"
 
-OUTPUT_DIR.mkdir(exist_ok=True)
+# Robots.txt parser
+rp = urllib.robotparser.RobotFileParser()
+rp.set_url(urljoin(SEED_URL, "/robots.txt"))
+try:
+    rp.read()
+except Exception as e:
+    print(f"Could not read robots.txt: {e}")
 
-# Set Tesseract path (for GitHub Actions)
-os.environ["TESSDATA_PREFIX"] = "/usr/share/tesseract-ocr/4.00/tessdata"
-
-# === HELPER FUNCTIONS ===
-def is_valid_url(url):
-    parsed = urlparse(url)
-    return bool(parsed.netloc) and parsed.scheme in ("http", "https")
+def can_fetch(url):
+    return rp.can_fetch(USER_AGENT, url)
 
 def normalize_url(url):
-    # Remove query params and fragments
-    url = re.split(r'[#?]', url)[0]
-    if url.endswith('/'):
-        url = url[:-1]
-    return url
+    parsed = urlparse(url)
+    return f"{parsed.scheme}://{parsed.netloc}{parsed.path}".rstrip('/')
 
-def get_file_extension(url):
-    ext = os.path.splitext(urlparse(url).path)[1].lower()
-    return ext
+def is_same_domain(url):
+    ext = tldextract.extract(url)
+    return f"{ext.domain}.{ext.suffix}" == DOMAIN
 
-def safe_filename(url):
-    # Remove unsafe characters for filenames
-    name = re.sub(r'[<>:"|?*\\]', '_', urlparse(url).path.strip('/'))
-    if not name:
-        name = "index"
-    return name + ".txt"
-def download_file(url, timeout=10):
+def get_content_type(url):
+    path = urlparse(url).path.lower()
+    if path.endswith('.pdf'):
+        return 'pdf'
+    if path.endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp')):
+        return 'image'
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
-        }
-        resp = requests.get(url, headers=headers, timeout=timeout)
-        resp.raise_for_status()
-        return resp.content
+        response = requests.head(url, allow_redirects=True, timeout=5)
+        content_type = response.headers.get('content-type', '').lower()
+        if 'application/pdf' in content_type:
+            return 'pdf'
+        if 'image/' in content_type:
+            return 'image'
+    except:
+        pass
+    return 'html'
+
+def extract_html_text(url):
+    try:
+        resp = requests.get(url, headers={'User-Agent': USER_AGENT}, timeout=10)
+        if resp.status_code != 200:
+            return None
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        for script in soup(["script", "style"]):
+            script.decompose()
+        return soup.get_text(separator='\n', strip=True)
     except Exception as e:
-        print(f"❌ Failed to download {url}: {e}")
+        print(f"Error fetching HTML {url}: {e}")
         return None
 
-def extract_text_from_pdf(content):
-    text = ""
+def extract_pdf_text(url):
     try:
-        # Try PyPDF2 first
-        reader = PdfReader(io.BytesIO(content))
-        for page in reader.pages:
-            extracted = page.extract_text()
-            if extracted:
-                text += extracted + "\n"
-    except Exception:
-        pass
-    
-    # Fallback to pdfplumber if PyPDF2 failed
-    if not text.strip():
-        try:
-            with pdfplumber.open(io.BytesIO(content)) as pdf:
-                for page in pdf.pages:
-                    extracted = page.extract_text()
-                    if extracted:
-                        text += extracted + "\n"
-        except Exception as e:
-            print(f"⚠️ PDF fallback failed: {e}")
-    
-    return text.strip()
-
-def extract_text_from_image(content):
-    try:
-        img = Image.open(io.BytesIO(content))
-        # Convert to grayscale for better OCR
-        img = img.convert("L")
-        text = pytesseract.image_to_string(img, lang='eng')
-        return text.strip()
+        resp = requests.get(url, headers={'User-Agent': USER_AGENT}, timeout=15)
+        if resp.status_code != 200:
+            return None
+        with pdfplumber.open(BytesIO(resp.content)) as pdf:
+            return "\n".join([page.extract_text() or '' for page in pdf.pages])
     except Exception as e:
-        print(f"⚠️ OCR failed: {e}")
-        return ""
+        print(f"Error processing PDF {url}: {e}")
+        return None
 
-# === MAIN CRAWLER CLASS ===
-class UniversityCrawler:    def __init__(self):
-        self.visited = set()
-        self.to_visit = [(BASE_URL, 0)]  # (url, depth)
-        self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (compatible; FMU-Crawler/1.0; +https://github.com/yourname/fmuniversity-crawler)"
-        })
+def extract_image_text(url):
+    try:
+        resp = requests.get(url, headers={'User-Agent': USER_AGENT}, timeout=10)
+        if resp.status_code != 200:
+            return None
+        img = Image.open(BytesIO(resp.content))
+        return pytesseract.image_to_string(img).strip()
+    except Exception as e:
+        print(f"Error processing image {url}: {e}")
+        return None
 
-    def crawl(self):
-        pbar = tqdm.tqdm(total=MAX_PAGES, desc="Crawling")
-        while self.to_visit and len(self.visited) < MAX_PAGES:
-            url, depth = self.to_visit.pop(0)
-            normalized = normalize_url(url)
+def save_to_file(url, content_type, text):
+    with open(OUTPUT_FILE, 'a', encoding='utf-8') as f:
+        f.write(f"\n=== URL: {url} ===\n")
+        f.write(f"TYPE: {content_type.upper()}\n")
+        f.write("CONTENT:\n")
+        f.write(text if text else "[No extractable text]")
+        f.write("\n" + "="*50 + "\n")
 
-            if normalized in self.visited or depth > MAX_DEPTH:
-                continue
+def crawl():
+    QUEUE.append(SEED_URL)
+    pages_crawled = 0
 
-            self.visited.add(normalized)
-            pbar.update(1)
+    while QUEUE and pages_crawled < MAX_PAGES:
+        url = QUEUE.pop(0)
+        norm_url = normalize_url(url)
+        if norm_url in VISITED:
+            continue
+        if not is_same_domain(norm_url):
+            continue
+        if not can_fetch(norm_url):
+            print(f"Skipping {norm_url} (disallowed by robots.txt)")
+            continue
 
-            print(f"\n🔍 Crawling: {normalized} (depth={depth})")
-            time.sleep(DELAY)
+        VISITED.add(norm_url)
+        print(f"Crawling: {norm_url}")
 
-            content = download_file(normalized)
-            if not content:
-                continue
+        ctype = get_content_type(norm_url)
+        text = None
 
-            ext = get_file_extension(normalized)
-            file_path = OUTPUT_DIR / safe_filename(normalized)
-
-            # Handle different file types
-            if ext in ['.pdf']:
-                text = extract_text_from_pdf(content)
-                self._save_text(text, file_path, normalized)
-            elif ext in ['.jpg', '.jpeg', '.png', '.gif', '.bmp']:
-                text = extract_text_from_image(content)
-                self._save_text(text, file_path, normalized)
-            else:
-                # Treat as HTML
+        if ctype == 'html':
+            text = extract_html_text(norm_url)
+            if text:
+                save_to_file(norm_url, ctype, text)
+                # Extract links
                 try:
-                    soup = BeautifulSoup(content, 'html.parser')
-                    # Remove scripts/styles to avoid junk text
-                    for tag in soup(["script", "style"]):
-                        tag.decompose()
-                    text = soup.get_text(separator="\n", strip=True)
-                    self._save_text(text, file_path, normalized)
+                    resp = requests.get(norm_url, headers={'User-Agent': USER_AGENT}, timeout=10)
+                    if resp.status_code == 200:
+                        soup = BeautifulSoup(resp.text, 'html.parser')
+                        for link in soup.find_all('a', href=True):
+                            href = urljoin(norm_url, link['href'])
+                            if href.startswith(('http://', 'https://')) and is_same_domain(href):
+                                norm_href = normalize_url(href)
+                                if norm_href not in VISITED and norm_href not in QUEUE:
+                                    QUEUE.append(norm_href)
                 except Exception as e:
-                    print(f"⚠️ HTML parse error: {e}")
+                    print(f"Error extracting links from {norm_url}: {e}")
+        elif ctype == 'pdf':
+            text = extract_pdf_text(norm_url)
+            save_to_file(norm_url, ctype, text)
+        elif ctype == 'image':
+            text = extract_image_text(norm_url)
+            save_to_file(norm_url, ctype, text)
 
-            # Only extract links from HTML pages            if ext == '':
-                try:
-                    soup = BeautifulSoup(content, 'html.parser')
-                    links = soup.find_all('a', href=True)
-                    for link in links:
-                        href = link['href']
-                        full_url = urljoin(normalized, href)
-                        # Only follow links within the target domain
-                        if is_valid_url(full_url) and BASE_URL in full_url:
-                            full_norm = normalize_url(full_url)
-                            if full_norm not in self.visited and len(self.to_visit) < MAX_PAGES:
-                                self.to_visit.append((full_norm, depth + 1))
-                except Exception as e:
-                    print(f"⚠️ Link extraction error: {e}")
+        pages_crawled += 1
+        time.sleep(DELAY)
 
-        pbar.close()
-        print(f"\n✅ Crawled {len(self.visited)} pages successfully.")
+    print(f"Crawling finished. Processed {pages_crawled} pages.")
 
-    def _save_text(self, text, filepath, url):
-        header = f"URL: {url}\nTimestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n{'='*50}\n\n"
-        full_text = header + (text or "[No extractable text found]")
-        filepath.write_text(full_text, encoding='utf-8')
-
-# === RUN CRAWLER ===
 if __name__ == "__main__":
-    crawler = UniversityCrawler()
-    crawler.crawl()
+    open(OUTPUT_FILE, 'w').close()
+    crawl()
