@@ -1,0 +1,38 @@
+name: Crawl FMU Website
+
+on:
+  schedule:
+    - cron: '0 2 * * MON'   # Every Monday at 02:00 UTC
+  workflow_dispatch:         # Manual trigger
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-eng libtesseract-dev
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run crawler
+        run: python crawler.py
+
+      - name: Commit & Push results (if new files)
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: update crawled data from FMU website"
+          branch: main
+          file_pattern: 'output/*.txt'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
