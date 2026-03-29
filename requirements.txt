@@ -1,6 +1,4 @@
-requests
-beautifulsoup4
-tldextract
+scrapy
 pdfplumber
 Pillow
 pytesseract
