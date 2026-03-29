@@ -1,154 +1,115 @@
-import os
-import requests
-import time
-import urllib.robotparser
-from urllib.parse import urljoin, urlparse
-import tldextract
-from bs4 import BeautifulSoup
+import scrapy
 import pdfplumber
 from PIL import Image
 import pytesseract
 from io import BytesIO
+import re
+from urllib.parse import urlparse
 
-# Configuration
-SEED_URL = "https://fmuniversity.nic.in/index"
-OUTPUT_FILE = "crawled_data.txt"
-DELAY = 1  # seconds between requests
-USER_AGENT = "Mozilla/5.0 (compatible; FMU-Crawler/1.0; +https://github.com/yourrepo)"
-MAX_PAGES = 500
-VISITED = set()
-QUEUE = []
-DOMAIN = "fmuniversity.nic.in"
 
-# Robots.txt parser
-rp = urllib.robotparser.RobotFileParser()
-rp.set_url(urljoin(SEED_URL, "/robots.txt"))
-try:
-    rp.read()
-except Exception as e:
-    print(f"Could not read robots.txt: {e}")
+# ---------- Pipeline ----------
+class TextFilePipeline:
+    def open_spider(self, spider):
+        self.file = open('crawled_data.txt', 'w', encoding='utf-8')
+        self.file.write("Crawled Data from fmuniversity.nic.in\n")
+        self.file.write("=" * 50 + "\n")
+        self.file.flush()
 
-def can_fetch(url):
-    return rp.can_fetch(USER_AGENT, url)
+    def close_spider(self, spider):
+        self.file.close()
 
-def normalize_url(url):
-    parsed = urlparse(url)
-    return f"{parsed.scheme}://{parsed.netloc}{parsed.path}".rstrip('/')
+    def process_item(self, item, spider):
+        url = item.get('url', '')
+        ctype = item.get('content_type', '').upper()
+        text = item.get('text', '') or "[NO TEXT]"
 
-def is_same_domain(url):
-    ext = tldextract.extract(url)
-    return f"{ext.domain}.{ext.suffix}" == DOMAIN
+        self.file.write(f"\n=== {url} ===\n")
+        self.file.write(f"TYPE: {ctype}\n")
+        self.file.write("CONTENT:\n")
+        self.file.write(text)
+        self.file.write("\n" + "=" * 50 + "\n")
+        self.file.flush()
+        return item
 
-def get_content_type(url):
-    path = urlparse(url).path.lower()
-    if path.endswith('.pdf'):
-        return 'pdf'
-    if path.endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp')):
-        return 'image'
-    try:
-        response = requests.head(url, allow_redirects=True, timeout=5)
-        content_type = response.headers.get('content-type', '').lower()
-        if 'application/pdf' in content_type:
-            return 'pdf'
-        if 'image/' in content_type:
-            return 'image'
-    except:
-        pass
-    return 'html'
 
-def extract_html_text(url):
-    try:
-        resp = requests.get(url, headers={'User-Agent': USER_AGENT}, timeout=10)
-        if resp.status_code != 200:
-            return None
-        soup = BeautifulSoup(resp.text, 'html.parser')
-        for script in soup(["script", "style"]):
-            script.decompose()
-        return soup.get_text(separator='\n', strip=True)
-    except Exception as e:
-        print(f"Error fetching HTML {url}: {e}")
-        return None
+# ---------- Item ----------
+class PageItem(scrapy.Item):
+    url = scrapy.Field()
+    content_type = scrapy.Field()
+    text = scrapy.Field()
 
-def extract_pdf_text(url):
-    try:
-        resp = requests.get(url, headers={'User-Agent': USER_AGENT}, timeout=15)
-        if resp.status_code != 200:
-            return None
-        with pdfplumber.open(BytesIO(resp.content)) as pdf:
-            return "\n".join([page.extract_text() or '' for page in pdf.pages])
-    except Exception as e:
-        print(f"Error processing PDF {url}: {e}")
-        return None
 
-def extract_image_text(url):
-    try:
-        resp = requests.get(url, headers={'User-Agent': USER_AGENT}, timeout=10)
-        if resp.status_code != 200:
-            return None
-        img = Image.open(BytesIO(resp.content))
-        return pytesseract.image_to_string(img).strip()
-    except Exception as e:
-        print(f"Error processing image {url}: {e}")
-        return None
+# ---------- Spider ----------
+class FMUSpider(scrapy.Spider):
+    name = "fmu"
+    allowed_domains = ["fmuniversity.nic.in"]
+    start_urls = ["https://fmuniversity.nic.in/index"]
 
-def save_to_file(url, content_type, text):
-    with open(OUTPUT_FILE, 'a', encoding='utf-8') as f:
-        f.write(f"\n=== URL: {url} ===\n")
-        f.write(f"TYPE: {content_type.upper()}\n")
-        f.write("CONTENT:\n")
-        f.write(text if text else "[No extractable text]")
-        f.write("\n" + "="*50 + "\n")
+    custom_settings = {
+        'ROBOTSTXT_OBEY': True,
+        'CONCURRENT_REQUESTS': 8,
+        'DOWNLOAD_DELAY': 1,
+        'LOG_LEVEL': 'INFO',
+        'ITEM_PIPELINES': {'__main__.TextFilePipeline': 300},
+    }
 
-def crawl():
-    QUEUE.append(SEED_URL)
-    pages_crawled = 0
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.processed_urls = set()
 
-    while QUEUE and pages_crawled < MAX_PAGES:
-        url = QUEUE.pop(0)
-        norm_url = normalize_url(url)
-        if norm_url in VISITED:
-            continue
-        if not is_same_domain(norm_url):
-            continue
-        if not can_fetch(norm_url):
-            print(f"Skipping {norm_url} (disallowed by robots.txt)")
-            continue
+    def normalise_url(self, url):
+        parsed = urlparse(url)
+        return f"{parsed.scheme}://{parsed.netloc}{parsed.path}".rstrip('/')
 
-        VISITED.add(norm_url)
-        print(f"Crawling: {norm_url}")
+    def is_allowed(self, url):
+        parsed = urlparse(url)
+        domain = parsed.netloc
+        return any(domain == d or domain.endswith('.' + d) for d in self.allowed_domains)
 
-        ctype = get_content_type(norm_url)
-        text = None
+    def clean_text(self, text):
+        return re.sub(r'\s+', ' ', text).strip()
 
-        if ctype == 'html':
-            text = extract_html_text(norm_url)
-            if text:
-                save_to_file(norm_url, ctype, text)
-                # Extract links
-                try:
-                    resp = requests.get(norm_url, headers={'User-Agent': USER_AGENT}, timeout=10)
-                    if resp.status_code == 200:
-                        soup = BeautifulSoup(resp.text, 'html.parser')
-                        for link in soup.find_all('a', href=True):
-                            href = urljoin(norm_url, link['href'])
-                            if href.startswith(('http://', 'https://')) and is_same_domain(href):
-                                norm_href = normalize_url(href)
-                                if norm_href not in VISITED and norm_href not in QUEUE:
-                                    QUEUE.append(norm_href)
-                except Exception as e:
-                    print(f"Error extracting links from {norm_url}: {e}")
-        elif ctype == 'pdf':
-            text = extract_pdf_text(norm_url)
-            save_to_file(norm_url, ctype, text)
-        elif ctype == 'image':
-            text = extract_image_text(norm_url)
-            save_to_file(norm_url, ctype, text)
+    def parse(self, response):
+        norm_url = self.normalise_url(response.url)
+        if norm_url in self.processed_urls:
+            return
+        self.processed_urls.add(norm_url)
 
-        pages_crawled += 1
-        time.sleep(DELAY)
+        ctype_header = response.headers.get('Content-Type', b'').decode().lower()
 
-    print(f"Crawling finished. Processed {pages_crawled} pages.")
+        # ---------- HTML ----------
+        if 'text/html' in ctype_header:
+            text_nodes = response.xpath('//body//text()[not(ancestor::script) and not(ancestor::style)]').getall()
+            text = self.clean_text(' '.join(text_nodes))
+            yield PageItem(url=response.url, content_type='html', text=text)
 
-if __name__ == "__main__":
-    open(OUTPUT_FILE, 'w').close()
-    crawl()
+            for href in response.css('a::attr(href)').getall():
+                url = response.urljoin(href)
+                norm_link = self.normalise_url(url)
+                if self.is_allowed(norm_link) and norm_link not in self.processed_urls:
+                    yield scrapy.Request(norm_link, callback=self.parse)
+
+        # ---------- PDF ----------
+        elif 'application/pdf' in ctype_header or response.url.lower().endswith('.pdf'):
+            try:
+                with pdfplumber.open(BytesIO(response.body)) as pdf:
+                    page_texts = [page.extract_text() or '' for page in pdf.pages]
+                    text = self.clean_text('\n'.join(page_texts))
+            except Exception as e:
+                self.logger.warning(f"Failed to process PDF {response.url}: {e}")
+                text = ""
+            yield PageItem(url=response.url, content_type='pdf', text=text)
+
+        # ---------- IMAGE ----------
+        elif 'image/' in ctype_header or re.search(r'\.(jpg|jpeg|png|webp|bmp|gif)$', response.url.lower()):
+            try:
+                img = Image.open(BytesIO(response.body))
+                text = pytesseract.image_to_string(img)
+                text = self.clean_text(text)
+            except Exception as e:
+                self.logger.warning(f"Failed to process image {response.url}: {e}")
+                text = ""
+            yield PageItem(url=response.url, content_type='image', text=text)
+
+        else:
+            self.logger.debug(f"Skipping unsupported content type: {response.url}")
