@@ -2,39 +2,44 @@ name: Run Scrapy Crawler
 
 on:
   schedule:
-    - cron: "0 0 * * *"   # Runs daily at midnight UTC
-  workflow_dispatch:       # Manual run button
+    - cron: '0 2 * * 0'
+  workflow_dispatch:
 
 jobs:
   crawl:
     runs-on: ubuntu-latest
-
     steps:
-      - name: 📥 Checkout Repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: 🐍 Set up Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: '3.10'
 
-      - name: 📦 Install Dependencies
+      - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y tesseract-ocr
-          pip install scrapy pdfplumber pillow pytesseract
+          sudo apt-get install -y tesseract-ocr poppler-utils
 
-      - name: ▶️ Run Spider
+      - name: Install Python dependencies
         run: |
-          python your_spider_file.py
+          pip install -r requirements.txt
 
-      - name: 📤 Commit and Push Output
+      - name: Run spider
         run: |
-          git config --global user.name "github-actions"
-          git config --global user.email "actions@github.com"
+          scrapy runspider fmu_spider.py
 
+      - name: Upload crawled data (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: crawled-data
+          path: crawled_data.txt
+
+      - name: Commit and push if changes
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
           git add crawled_data.txt
-
-          git commit -m "Updated crawled data [auto]" || echo "No changes to commit"
-
+          git diff --quiet && git diff --staged --quiet || git commit -m "Update crawled data"
           git push
